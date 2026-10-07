@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>사과 받기 게임</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    height: 100%;
+    background: #1d2b1f;
+    font-family: "Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+    color: #fff;
+    overflow: hidden;
+    touch-action: none;
+    user-select: none;
+  }
+  #wrap {
+    position: relative;
+    width: 100%;
+    max-width: 480px;
+    height: 100%;
+    max-height: 800px;
+    margin: 0 auto;
+  }
+  canvas { display: block; width: 100%; height: 100%; }
+  #hud {
+    position: absolute; top: 0; left: 0; right: 0;
+    display: flex; justify-content: space-between;
+    padding: 12px 16px;
+    font-size: 20px; font-weight: 700;
+    text-shadow: 0 2px 4px rgba(0,0,0,.5);
+    pointer-events: none;
+  }
+  .overlay {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 16px;
+    background: rgba(0,0,0,.55);
+    text-align: center;
+    padding: 16px;
+  }
+  .overlay h1 { font-size: 40px; }
+  .overlay p { font-size: 17px; line-height: 1.6; opacity: .9; }
+  .overlay button {
+    font-size: 22px; font-weight: 700;
+    padding: 12px 36px;
+    border: none; border-radius: 999px;
+    background: #e53935; color: #fff;
+    cursor: pointer;
+    box-shadow: 0 4px 0 #8e1c1a;
+  }
+  .overlay button:active { transform: translateY(3px); box-shadow: 0 1px 0 #8e1c1a; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game"></canvas>
+  <div id="hud">
+    <span id="score">점수 0</span>
+    <span id="lives">❤️❤️❤️</span>
+  </div>
+
+  <div id="start" class="overlay">
+    <h1>🍎 사과 받기</h1>
+    <p>떨어지는 사과를 바구니로 받으세요!<br>
+       🍎 +1점 · 🍏 +3점 · 💣 폭탄은 피하세요<br>
+       사과를 3번 놓치거나 폭탄을 받으면 게임 오버</p>
+    <p>← → 키, 마우스, 또는 터치로 이동</p>
+    <button id="startBtn">시작하기</button>
+    <p id="bestStart"></p>
+  </div>
+
+  <div id="over" class="overlay hidden">
+    <h1>게임 오버</h1>
+    <p id="finalScore"></p>
+    <button id="retryBtn">다시 하기</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const scoreEl = document.getElementById('score');
+  const livesEl = document.getElementById('lives');
+  const startEl = document.getElementById('start');
+  const overEl = document.getElementById('over');
+  const finalEl = document.getElementById('finalScore');
+  const bestStartEl = document.getElementById('bestStart');
+
+  let W = 0, H = 0, dpr = 1;
+  function resize() {
+    const r = canvas.getBoundingClientRect();
+    dpr = window.devicePixelRatio || 1;
+    W = r.width; H = r.height;
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    basket.y = H - 70;
+    basket.x = Math.min(Math.max(basket.x, basket.w / 2), W - basket.w / 2);
+  }
+
+  const basket = { x: 0, y: 0, w: 90, h: 40, speed: 520 };
+  let items, particles, score, lives, running, spawnTimer, elapsed, last;
+  const keys = { left: false, right: false };
+  let pointerX = null;
+
+  function getBest() {
+    try { return +localStorage.getItem('appleBest') || 0; } catch { return 0; }
+  }
+  function setBest(v) {
+    try { localStorage.setItem('appleBest', v); } catch {}
+  }
+  function showBest() {
+    const b = getBest();
+    bestStartEl.textContent = b ? `최고 점수: ${b}` : '';
+  }
+
+  function reset() {
+    items = []; particles = [];
+    score = 0; lives = 3;
+    spawnTimer = 0; elapsed = 0;
+    basket.x = W / 2;
+    updateHud();
+  }
+
+  function updateHud() {
+    scoreEl.textContent = `점수 ${score}`;
+    livesEl.textContent = '❤️'.repeat(lives) + '🖤'.repeat(3 - lives);
+  }
+
+  function spawn() {
+    const r = Math.random();
+    const bombChance = Math.min(0.08 + elapsed * 0.002, 0.25);
+    let type = 'red';
+    if (r < bombChance) type = 'bomb';
+    else if (r < bombChance + 0.12) type = 'green';
+    const size = 22;
+    items.push({
+      type,
+      x: size + Math.random() * (W - size * 2),
+      y: -size,
+      r: size,
+      vy: 140 + elapsed * 6 + Math.random() * 60,
+      rot: Math.random() * Math.PI,
+      vr: (Math.random() - .5) * 3,
+    });
+  }
+
+  function burst(x, y, color, n = 12) {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2, s = 60 + Math.random() * 180;
+      particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 80, life: .6, color });
+    }
+  }
+
+  function popText(x, y, text, color) {
+    particles.push({ x, y, vx: 0, vy: -60, life: .8, text, color });
+  }
+
+  function update(dt) {
+    elapsed += dt;
+
+    // 바구니 이동
+    if (pointerX !== null) {
+      basket.x += (pointerX - basket.x) * Math.min(1, dt * 18);
+    } else {
+      if (keys.left) basket.x -= basket.speed * dt;
+      if (keys.right) basket.x += basket.speed * dt;
+    }
+    basket.x = Math.min(Math.max(basket.x, basket.w / 2), W - basket.w / 2);
+
+    // 생성
+    spawnTimer -= dt;
+    if (spawnTimer <= 0) {
+      spawn();
+      spawnTimer = Math.max(0.35, 1.0 - elapsed * 0.012);
+    }
+
+    // 아이템
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i];
+      it.y += it.vy * dt;
+      it.rot += it.vr * dt;
+
+      const top = basket.y - basket.h / 2;
+      const caught = it.y + it.r * .6 >= top && it.y - it.r < top + 14 &&
+                     Math.abs(it.x - basket.x) < basket.w / 2 + it.r * .3;
+      if (caught) {
+        items.splice(i, 1);
+        if (it.type === 'bomb') {
+          burst(it.x, it.y, '#ff9800', 30);
+          lives = 0;
+          updateHud();
+          return gameOver();
+        }
+        const pts = it.type === 'green' ? 3 : 1;
+        score += pts;
+        burst(it.x, top, it.type === 'green' ? '#7cb342' : '#e53935');
+        popText(it.x, top - 10, `+${pts}`, '#fff');
+        updateHud();
+        continue;
+      }
+      if (it.y - it.r > H) {
+        items.splice(i, 1);
+        if (it.type !== 'bomb') {
+          lives--;
+          popText(it.x, H - 20, '놓침!', '#ff5252');
+          updateHud();
+          if (lives <= 0) return gameOver();
+        }
+      }
+    }
+
+    // 파티클
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.life -= dt;
+      if (p.life <= 0) { particles.splice(i, 1); continue; }
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      if (!p.text) p.vy += 500 * dt;
+    }
+  }
+
+  // ---------- 그리기 ----------
+  function drawBackground() {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#87ceeb');
+    g.addColorStop(1, '#d8f1ff');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    // 나무 잎
+    ctx.fillStyle = '#2e7d32';
+    for (let i = 0; i < 7; i++) {
+      const x = (i / 6) * W;
+      ctx.beginPath();
+      ctx.arc(x, 0, 60 + (i % 2) * 20, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.fillStyle = '#388e3c';
+    for (let i = 0; i < 6; i++) {
+      const x = ((i + .5) / 6) * W;
+      ctx.beginPath();
+      ctx.arc(x, 10, 45, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // 잔디
+    ctx.fillStyle = '#66bb6a';
+    ctx.fillRect(0, H - 30, W, 30);
+    ctx.fillStyle = '#4caf50';
+    ctx.fillRect(0, H - 30, W, 5);
+  }
+
+  function drawApple(x, y, r, rot, green) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(rot * .2);
+    ctx.fillStyle = green ? '#7cb342' : '#e53935';
+    ctx.beginPath();
+    ctx.arc(-r * .35, 0, r * .75, 0, Math.PI * 2);
+    ctx.arc(r * .35, 0, r * .75, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(0, r * .15, r * .8, 0, Math.PI * 2);
+    ctx.fill();
+    // 하이라이트
+    ctx.fillStyle = 'rgba(255,255,255,.35)';
+    ctx.beginPath();
+    ctx.ellipse(-r * .4, -r * .25, r * .18, r * .3, -.5, 0, Math.PI * 2);
+    ctx.fill();
+    // 꼭지
+    ctx.strokeStyle = '#5d4037';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(0, -r * .55);
+    ctx.lineTo(r * .1, -r * 1.05);
+    ctx.stroke();
+    // 잎
+    ctx.fillStyle = '#43a047';
+    ctx.beginPath();
+    ctx.ellipse(r * .35, -r * .9, r * .3, r * .14, -.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawBomb(x, y, r, rot) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(rot);
+    ctx.fillStyle = '#263238';
+    ctx.beginPath();
+    ctx.arc(0, 0, r * .85, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,.25)';
+    ctx.beginPath();
+    ctx.arc(-r * .3, -r * .3, r * .2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#455a64';
+    ctx.fillRect(-r * .2, -r * 1.05, r * .4, r * .3);
+    ctx.strokeStyle = '#8d6e63';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, -r * 1.05);
+    ctx.quadraticCurveTo(r * .3, -r * 1.4, r * .5, -r * 1.25);
+    ctx.stroke();
+    ctx.fillStyle = Math.random() < .5 ? '#ffeb3b' : '#ff9800';
+    ctx.beginPath();
+    ctx.arc(r * .5, -r * 1.25, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawBasket() {
+    const { x, y, w, h } = basket;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.fillStyle = '#a1662f';
+    ctx.beginPath();
+    ctx.moveTo(-w / 2, -h / 2);
+    ctx.lineTo(w / 2, -h / 2);
+    ctx.lineTo(w / 2 - 12, h / 2);
+    ctx.lineTo(-w / 2 + 12, h / 2);
+    ctx.closePath();
+    ctx.fill();
+    // 짜임 무늬
+    ctx.strokeStyle = '#7b4a1e';
+    ctx.lineWidth = 2;
+    for (let i = 1; i < 3; i++) {
+      const yy = -h / 2 + (h / 3) * i;
+      ctx.beginPath();
+      ctx.moveTo(-w / 2 + 4 * i, yy);
+      ctx.lineTo(w / 2 - 4 * i, yy);
+      ctx.stroke();
+    }
+    for (let i = -3; i <= 3; i++) {
+      ctx.beginPath();
+      ctx.moveTo(i * 12, -h / 2);
+      ctx.lineTo(i * 10, h / 2);
+      ctx.stroke();
+    }
+    // 테두리
+    ctx.fillStyle = '#c68642';
+    ctx.fillRect(-w / 2 - 4, -h / 2 - 6, w + 8, 8);
+    ctx.restore();
+  }
+
+  function draw() {
+    drawBackground();
+    for (const it of items) {
+      if (it.type === 'bomb') drawBomb(it.x, it.y, it.r, it.rot);
+      else drawApple(it.x, it.y, it.r, it.rot, it.type === 'green');
+    }
+    drawBasket();
+    for (const p of particles) {
+      ctx.globalAlpha = Math.max(0, p.life / .6);
+      if (p.text) {
+        ctx.fillStyle = p.color;
+        ctx.font = 'bold 22px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.strokeStyle = 'rgba(0,0,0,.5)';
+        ctx.lineWidth = 3;
+        ctx.strokeText(p.text, p.x, p.y);
+        ctx.fillText(p.text, p.x, p.y);
+      } else {
+        ctx.fillStyle = p.color;
+        ctx.fillRect(p.x - 3, p.y - 3, 6, 6);
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function loop(t) {
+    const dt = Math.min((t - last) / 1000, 0.05);
+    last = t;
+    if (running) update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  function start() {
+    reset();
+    running = true;
+    startEl.classList.add('hidden');
+    overEl.classList.add('hidden');
+  }
+
+  function gameOver() {
+    running = false;
+    const best = Math.max(getBest(), score);
+    setBest(best);
+    finalEl.innerHTML = `점수: <b>${score}</b><br>최고 점수: ${best}`;
+    overEl.classList.remove('hidden');
+  }
+
+  // ---------- 입력 ----------
+  window.addEventListener('keydown', e => {
+    if (e.key === 'ArrowLeft' || e.key === 'a') { keys.left = true; pointerX = null; }
+    if (e.key === 'ArrowRight' || e.key === 'd') { keys.right = true; pointerX = null; }
+    if ((e.key === ' ' || e.key === 'Enter') && !running) start();
+  });
+  window.addEventListener('keyup', e => {
+    if (e.key === 'ArrowLeft' || e.key === 'a') keys.left = false;
+    if (e.key === 'ArrowRight' || e.key === 'd') keys.right = false;
+  });
+  function setPointer(clientX) {
+    const r = canvas.getBoundingClientRect();
+    pointerX = clientX - r.left;
+  }
+  canvas.addEventListener('mousemove', e => setPointer(e.clientX));
+  canvas.addEventListener('touchstart', e => { setPointer(e.touches[0].clientX); e.preventDefault(); }, { passive: false });
+  canvas.addEventListener('touchmove', e => { setPointer(e.touches[0].clientX); e.preventDefault(); }, { passive: false });
+
+  document.getElementById('startBtn').addEventListener('click', start);
+  document.getElementById('retryBtn').addEventListener('click', start);
+  window.addEventListener('resize', resize);
+
+  resize();
+  reset();
+  showBest();
+  running = false;
+  last = performance.now();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
